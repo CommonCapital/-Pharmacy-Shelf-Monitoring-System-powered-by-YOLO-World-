@@ -1,0 +1,42 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: pharmacy_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: pharmacy_shelf
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  fastapi:
+    build: ./fastapi
+    container_name: pharmacy_ml
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./fastapi:/app
+      - /Users/alisultanomariv/Documents/Zero-Shot Object Detection with YOLO-World/dog.jpeg:/app/dog.jpeg # For testing
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  nextjs:
+    build: ./nextjs
+    container_name: pharmacy_dashboard
+    ports:
+      - "3000:3000"
+    depends_on:
+      - db
+      - fastapi
+    environment:
+      - DATABASE_URL=postgres://postgres:password@db:5432/pharmacy_shelf
+      - ML_SERVICE_URL=http://fastapi:8000
+    volumes:
+      - ./nextjs:/app
+      - /app/node_modules
+
+volumes:
+  postgres_data:
