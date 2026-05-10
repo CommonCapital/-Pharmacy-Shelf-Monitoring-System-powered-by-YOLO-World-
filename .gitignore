@@ -28,7 +28,7 @@ yarn-error.log*
 *.mp4
 *.avi
 *.mkv
-my_yolo_world_model.pt
+
 
 # Environment Variables
 .env
