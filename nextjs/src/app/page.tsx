@@ -17,8 +17,11 @@ export default function PrototypePage() {
   const [currentBox, setCurrentBox] = useState<{x1: number, y1: number, x2: number, y2: number} | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [videoResults, setVideoResults] = useState<any[]>([]);
+  const [detectedJson, setDetectedJson] = useState<any[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [originalMediaUrl, setOriginalMediaUrl] = useState<string | null>(null);
+  const [processedMediaUrl, setProcessedMediaUrl] = useState<string | null>(null);
+  const [mediaType, setMediaType] = useState<'video' | 'image' | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   // Draw the image and boxes on the canvas
@@ -146,12 +149,18 @@ export default function PrototypePage() {
   };
 
   // 2. Monitoring Phase: Video Comparison
-  const handleVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleMediaUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || boxes.length === 0) return;
     
-    setVideoUrl(URL.createObjectURL(file));
+    const isImage = file.type.startsWith('image/');
+    setMediaType(isImage ? 'image' : 'video');
+    setOriginalMediaUrl(URL.createObjectURL(file));
+    setProcessedMediaUrl(null);
+    setVideoResults([]);
+    setDetectedJson([]);
     setIsProcessing(true);
+    
     const formData = new FormData();
     formData.append('video', file);
     
@@ -159,13 +168,15 @@ export default function PrototypePage() {
     const backendBoxes = boxes.map(({x1, y1, x2, y2, label}) => ({x1, y1, x2, y2, label}));
     formData.append('config', JSON.stringify(backendBoxes));
 
-    // This calls the FastAPI backend to process video against JSON config
+    // This calls the FastAPI backend to process video/image against JSON config
     const res = await fetch('http://localhost:8000/process-video', {
       method: 'POST',
       body: formData
     });
     const results = await res.json();
-    setVideoResults(results);
+    setProcessedMediaUrl(results.media_url);
+    setVideoResults(results.comparison);
+    setDetectedJson(results.detected_json);
     setIsProcessing(false);
   };
 
@@ -219,28 +230,67 @@ export default function PrototypePage() {
       {/* Step 2: Comparison */}
       {boxes.length > 0 && (
         <section className="space-y-4 border-t border-slate-100 pt-10">
-          <h2 className="text-sm font-bold text-[#002147] uppercase tracking-widest">Step 2: Upload Live Video to Compare</h2>
-          <input type="file" accept="video/*" onChange={handleVideoUpload} className="block w-full text-sm text-slate-500" />
+          <h2 className="text-sm font-bold text-[#002147] uppercase tracking-widest">Step 2: Upload Live Video or Image to Compare</h2>
+          <input type="file" accept="video/*,image/*" onChange={handleMediaUpload} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-[#002147] hover:file:bg-blue-100" />
           
-          {isProcessing && <div className="text-blue-600 font-bold animate-pulse text-sm mt-4">Processing Video via YOLO-World...</div>}
+          {isProcessing && <div className="text-blue-600 font-bold animate-pulse text-sm mt-4">Processing via YOLO-World...</div>}
 
-          {videoUrl && (
-            <div className="mt-6 border-4 border-slate-100 rounded-xl overflow-hidden shadow-sm">
-              <video src={videoUrl} controls className="w-full h-auto bg-black" />
-            </div>
-          )}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
+            {originalMediaUrl && !processedMediaUrl && (
+              <div className="border-4 border-slate-100 rounded-xl overflow-hidden shadow-sm">
+                <div className="bg-slate-100 text-center text-xs py-1 font-bold text-slate-500 uppercase">Original Media</div>
+                {mediaType === 'video' ? (
+                  <video src={originalMediaUrl} controls className="w-full h-auto bg-black" />
+                ) : (
+                  <img src={originalMediaUrl} alt="Original" className="w-full h-auto object-contain bg-black" />
+                )}
+              </div>
+            )}
+            
+            {processedMediaUrl && (
+              <div className="border-4 border-[#002147] rounded-xl overflow-hidden shadow-sm">
+                <div className="bg-[#002147] text-center text-xs py-1 font-bold text-white uppercase">Processed Media (Live Boxing)</div>
+                {mediaType === 'video' ? (
+                  <video src={processedMediaUrl} controls autoPlay loop className="w-full h-auto bg-black" />
+                ) : (
+                  <img src={processedMediaUrl} alt="Processed" className="w-full h-auto object-contain bg-black" />
+                )}
+              </div>
+            )}
+          </div>
           
           {videoResults.length > 0 && (
-            <div className="bg-slate-50 p-6 rounded-xl space-y-4 border border-slate-100 mt-6">
-               <h3 className="text-xs font-bold text-slate-400 uppercase">Detection Diffs</h3>
-               {videoResults.map((res, i) => (
-                 <div key={i} className={`p-3 rounded-lg border flex justify-between items-center ${res.match ? 'bg-green-50 border-green-100' : 'bg-red-50 border-red-100'}`}>
-                    <span className="text-xs font-bold">{res.label}</span>
-                    <span className={`text-[10px] font-black uppercase ${res.match ? 'text-green-600' : 'text-red-600'}`}>
-                       {res.match ? 'Expected match' : `Expected ${res.label} returned ${res.detected}`}
-                    </span>
-                 </div>
-               ))}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-6">
+               <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 shadow-sm max-h-96 overflow-auto">
+                 <h3 className="text-xs font-bold text-[#002147] uppercase border-b pb-2 mb-2 sticky top-0 bg-slate-50">Planogram JSON (Expected)</h3>
+                 <pre className="text-[10px] text-slate-600 font-mono whitespace-pre-wrap">
+                   {JSON.stringify(boxes.map(({x1, y1, x2, y2, label}) => ({label, x1, y1, x2, y2})), null, 2)}
+                 </pre>
+               </div>
+               
+               <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 shadow-sm max-h-96 overflow-auto">
+                 <h3 className="text-xs font-bold text-[#002147] uppercase border-b pb-2 mb-2 sticky top-0 bg-slate-50">Detected JSON (Live)</h3>
+                 <pre className="text-[10px] text-slate-600 font-mono whitespace-pre-wrap">
+                   {JSON.stringify(detectedJson, null, 2)}
+                 </pre>
+               </div>
+
+               <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm max-h-96 overflow-auto space-y-3">
+                 <h3 className="text-xs font-bold text-[#002147] uppercase border-b pb-2 mb-2 sticky top-0 bg-white">Comparison Results</h3>
+                 {videoResults.map((res, i) => (
+                   <div key={i} className={`p-3 rounded-lg border ${res.match ? 'bg-green-50 border-green-100' : 'bg-red-50 border-red-100'}`}>
+                      <div className="flex justify-between items-center mb-1">
+                        <span className="text-xs font-bold">{res.label}</span>
+                        <span className={`text-[10px] font-black uppercase ${res.match ? 'text-green-600' : 'text-red-600'}`}>
+                           {res.match ? 'MATCH' : 'MISMATCH'}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-slate-500">
+                        {res.match ? `Correctly detected at expected position.` : `Expected ${res.label}, found ${res.detected}.`}
+                      </p>
+                   </div>
+                 ))}
+               </div>
             </div>
           )}
         </section>
