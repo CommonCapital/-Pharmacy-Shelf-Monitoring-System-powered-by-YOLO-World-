@@ -1,7 +1,10 @@
 fastapi
 uvicorn
 python-multipart
-inference[yolo-world]
+# inference[yolo-world]
+transformers
+timm
 supervision
 numpy>=1.26
 opencv-python
+torch

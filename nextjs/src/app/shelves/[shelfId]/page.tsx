@@ -113,7 +113,7 @@ export default function ShelfDetail() {
           </div>
           
           <svg className="absolute inset-0 w-full h-full" viewBox="0 0 800 450">
-            {/* Draw active detections from YOLO-World */}
+            {/* Draw active detections from Grounding DINO */}
             {activeDetections.map((det, i) => (
               <rect
                 key={`det-${i}`}
@@ -183,7 +183,7 @@ export default function ShelfDetail() {
         <div className="pt-6 border-t border-slate-100 flex justify-between items-center">
            <div className="text-center">
               <div className="text-[9px] font-black text-slate-400 uppercase mb-1">Model</div>
-              <div className="text-xs font-bold text-[#002147]">YOLO-W L.pt</div>
+              <div className="text-xs font-bold text-[#002147]">GDINO-T.pt</div>
            </div>
            <div className="text-center">
               <div className="text-[9px] font-black text-slate-400 uppercase mb-1">Latency</div>

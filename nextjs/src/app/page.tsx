@@ -183,7 +183,7 @@ export default function PrototypePage() {
   return (
     <div className="max-w-5xl mx-auto py-10 space-y-12">
       <header className="border-b border-slate-200 pb-6">
-        <h1 className="text-2xl font-black text-[#002147] tracking-tight uppercase">YOLO-World Prototype</h1>
+        <h1 className="text-2xl font-black text-[#002147] tracking-tight uppercase">Grounding DINO Prototype</h1>
         <p className="text-slate-400 text-sm italic">Upload Image → Label → Upload Video → Compare</p>
       </header>
 
@@ -233,7 +233,7 @@ export default function PrototypePage() {
           <h2 className="text-sm font-bold text-[#002147] uppercase tracking-widest">Step 2: Upload Live Video or Image to Compare</h2>
           <input type="file" accept="video/*,image/*" onChange={handleMediaUpload} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-[#002147] hover:file:bg-blue-100" />
           
-          {isProcessing && <div className="text-blue-600 font-bold animate-pulse text-sm mt-4">Processing via YOLO-World...</div>}
+          {isProcessing && <div className="text-blue-600 font-bold animate-pulse text-sm mt-4">Processing via Grounding DINO...</div>}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
             {originalMediaUrl && !processedMediaUrl && (

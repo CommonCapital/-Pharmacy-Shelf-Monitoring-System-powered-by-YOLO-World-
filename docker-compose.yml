@@ -19,7 +19,7 @@ services:
       - "8000:8000"
     volumes:
       - ./fastapi:/app
-      - /Users/alisultanomariv/Documents/Zero-Shot Object Detection with YOLO-World/dog.jpeg:/app/dog.jpeg # For testing
+      - ./dog.jpeg:/app/dog.jpeg # For testing
     environment:
       - PYTHONUNBUFFERED=1
 
