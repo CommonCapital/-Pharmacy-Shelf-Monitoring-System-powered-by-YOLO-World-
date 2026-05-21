@@ -5,6 +5,7 @@ import supervision as sv
 import json
 import os
 import torch
+import re
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,11 +24,18 @@ app.add_middleware(
 os.makedirs("static", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-print("Loading Grounding DINO model (Base)...")
-model_id = "IDEA-Research/grounding-dino-base"
+print("Loading Grounding DINO model...")
+local_model_path = "./local_gdino_model"
+
+if os.path.exists(local_model_path):
+    print(f"Loading from local directory: {local_model_path}")
+    model_id = local_model_path
+else:
+    print("Local directory not found. Loading from HuggingFace hub (will be cached)...")
+    model_id = "IDEA-Research/grounding-dino-base"
+
 processor = AutoProcessor.from_pretrained(model_id)
 gdino_detector = AutoModelForZeroShotObjectDetection.from_pretrained(model_id)
-
 
 if torch.cuda.is_available():
     device = "cuda"
@@ -69,7 +77,6 @@ async def process_video(video: UploadFile = File(...), config: str = Form(...)):
     
     text_prompt = ""
     if unique_classes:
-        # Grounding DINO works better with spaces around dots
         text_prompt = " . ".join(unique_classes).lower() + " ."
 
     temp_path = f"temp_{video.filename}"
@@ -86,125 +93,201 @@ async def process_video(video: UploadFile = File(...), config: str = Form(...)):
 
     def process_frame_targeted(frame, gt_boxes):
         """
-        Processes the frame by cropping into each GT box and running DINO on the crop.
+        Processes the frame by running Grounding DINO once on the full high-resolution image,
+        and then mapping the detected objects back to the planogram slots using IoU.
         """
-        h, w = frame.shape[:2]
-        print(f"DEBUG: Processing frame of size {w}x{h}")
+        h, w = int(frame.shape[0]), int(frame.shape[1])
+        print(f"DEBUG: Processing full frame of size {w}x{h}")
         
         slot_results = []
         all_detections_for_viz = []
         
-        # We can batch these for efficiency if needed, but let's start with a loop
-        for gt in gt_boxes:
-            x1_gt, y1_gt, x2_gt, y2_gt = gt['x1'], gt['y1'], gt['x2'], gt['y2']
-            
-            # Add 20% padding to the crop to give DINO some context
-            pad_w = (x2_gt - x1_gt) * 0.2
-            pad_h = (y2_gt - y1_gt) * 0.2
-            
-            crop_x1 = max(0, int(x1_gt - pad_w))
-            crop_y1 = max(0, int(y1_gt - pad_h))
-            crop_x2 = min(w, int(x2_gt + pad_w))
-            crop_y2 = min(h, int(y2_gt + pad_h))
-            
-            crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
-            if crop.size == 0:
-                slot_results.append({"label": gt['label'], "detected": "Empty", "match": False, "conf": 0, "expected_box": gt})
-                continue
-            
-            rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-            
-            # --- PASS 1: Competitive Check (All brands) ---
-            # This identifies if another brand is a better match to prevent "Agreement Bias"
-            prompt_comp = " . ".join(unique_classes).lower() + " ."
-            inputs_c = processor(images=rgb_crop, text=prompt_comp, return_tensors="pt").to(device)
-            with torch.no_grad():
-                outputs_c = gdino_detector(**inputs_c)
-            results_c = processor.post_process_grounded_object_detection(
-                outputs_c, inputs_c.input_ids, threshold=0.15, text_threshold=0.2, target_sizes=[crop.shape[:2]]
-            )[0]
+        # 1. Clean class labels and generate a high-recall competitive prompt
+        def get_clean_prompt(label):
+            cleaned = re.sub(r'[^a-zA-Z0-9\s\-]', ' ', label)
+            return " ".join(cleaned.split())
 
-            # --- PASS 2: Targeted Check (Expected brand ONLY) ---
-            # This gives the expected brand (like Fanta) the full attention of the model
-            prompt_target = f"{gt['label'].lower()} ."
-            inputs_t = processor(images=rgb_crop, text=prompt_target, return_tensors="pt").to(device)
-            with torch.no_grad():
-                outputs_t = gdino_detector(**inputs_t)
-            results_t = processor.post_process_grounded_object_detection(
-                outputs_t, inputs_t.input_ids, threshold=0.15, text_threshold=0.2, target_sizes=[crop.shape[:2]]
-            )[0]
+        def normalize(s):
+            return re.sub(r'[^a-zA-Z0-9]', '', s.lower())
 
-            import re
-            def normalize(s):
-                return re.sub(r'[^a-zA-Z0-9]', '', s.lower())
-
-            best_det_label = "Empty"
-            best_det_conf = 0.0
-            is_match = False
+        # Construct the full competitive prompt
+        prompt_comp = " . ".join([get_clean_prompt(c) for c in unique_classes]).lower() + " ."
+        
+        # 2. Run Grounding DINO on the full frame
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        inputs = processor(images=rgb_frame, text=prompt_comp, return_tensors="pt").to(device)
+        
+        with torch.no_grad():
+            outputs = gdino_detector(**inputs)
             
-            # Find the competitive winner
-            max_conf_c = 0.0
-            best_label_c = "Empty"
-            if len(results_c["scores"]) > 0:
-                for i, box in enumerate(results_c["boxes"].cpu().numpy()):
-                    if calculate_iou([box[0]+crop_x1, box[1]+crop_y1, box[2]+crop_x1, box[3]+crop_y1], [x1_gt, y1_gt, x2_gt, y2_gt]) > 0.2:
-                        conf = float(results_c["scores"][i])
-                        if conf > max_conf_c:
-                            max_conf_c = conf
-                            raw_lab = results_c["labels"][i].lower()
-                            # Map to your specific label
-                            for cls in unique_classes:
-                                if normalize(cls) in normalize(raw_lab) or normalize(raw_lab) in normalize(cls):
-                                    best_label_c = cls
-                                    break
+        import inspect
+        sig = inspect.signature(processor.post_process_grounded_object_detection)
+        kwargs = {"text_threshold": 0.2, "target_sizes": [[h, w]]}
+        if "box_threshold" in sig.parameters:
+            kwargs["box_threshold"] = 0.15
+        else:
+            kwargs["threshold"] = 0.15
 
-            # Find the targeted confidence
-            target_conf = 0.0
-            if len(results_t["scores"]) > 0:
-                for i, box in enumerate(results_t["boxes"].cpu().numpy()):
-                    if calculate_iou([box[0]+crop_x1, box[1]+crop_y1, box[2]+crop_x1, box[3]+crop_y1], [x1_gt, y1_gt, x2_gt, y2_gt]) > 0.2:
-                        conf = float(results_t["scores"][i])
-                        if conf > target_conf:
-                            target_conf = conf
+        results = processor.post_process_grounded_object_detection(
+            outputs, inputs.input_ids, **kwargs
+        )[0]
 
-            # Final Logic:
-            # 1. We trust the Competitive Winner (best_label_c) as the primary truth.
-            #    If it finds a different brand from your list, it's a MISMATCH.
-            if best_label_c != "Empty":
-                best_det_label = best_label_c
-                best_det_conf = max_conf_c
-                is_match = (normalize(best_label_c) == normalize(gt['label']))
-            
-            # 2. FALLBACK: If competitive pass is uncertain, but targeted pass (Fanta) 
-            #    is strong, we trust the targeted pass.
-            elif target_conf > 0.3:
-                is_match = True
-                best_det_label = gt['label']
-                best_det_conf = target_conf
+        # 3. Hybrid HSV Brand Classification Engine
+        def classify_hsv_color(h_val, s_val, v_val):
+            if v_val < 50: 
+                return "black"
+            if s_val < 50: 
+                if v_val > 200:
+                    return "white"
+                else:
+                    return "grey"
+            if h_val < 9 or h_val > 165:
+                return "red"
+            elif h_val < 24:
+                return "orange"
+            elif h_val < 38:
+                return "yellow"
+            elif h_val < 88:
+                return "green"
+            elif h_val < 133:
+                return "blue"
             else:
-                best_det_label = "Empty"
-                best_det_conf = 0.0
-                is_match = False
+                return "purple"
 
-            if best_det_label != "Empty":
-                all_detections_for_viz.append({"box": [x1_gt, y1_gt, x2_gt, y2_gt], "label": best_det_label, "score": best_det_conf})
+        def parse_colors_from_label(label_str):
+            label_lower = label_str.lower()
+            categories = ["red", "orange", "yellow", "green", "blue", "purple", "black", "white", "grey"]
+            matched = []
+            for cat in categories:
+                if cat in label_lower:
+                    matched.append(cat)
+            return matched
+
+        class_colors = {cls: parse_colors_from_label(cls) for cls in unique_classes}
+
+        def get_crop_classification(crop_img):
+            default_cls = unique_classes[0] if unique_classes else "sprite (green)"
+            if crop_img.size == 0:
+                return default_cls
                 
-            # Slot result remains at lines 202+
+            cw_crop, ch_crop = crop_img.shape[1], crop_img.shape[0]
+            ccx1 = int(cw_crop * 0.20)
+            ccy1 = int(ch_crop * 0.20)
+            ccx2 = int(cw_crop * 0.80)
+            ccy2 = int(ch_crop * 0.80)
+            
+            center_crop = crop_img[ccy1:ccy2, ccx1:ccx2]
+            hsv_crop = cv2.cvtColor(center_crop, cv2.COLOR_BGR2HSV)
+            h_plane, s_plane, v_plane = hsv_crop[:,:,0], hsv_crop[:,:,1], hsv_crop[:,:,2]
+            
+            flat_h = h_plane.flatten()
+            flat_s = s_plane.flatten()
+            flat_v = v_plane.flatten()
+            
+            pixel_colors = [classify_hsv_color(flat_h[idx], flat_s[idx], flat_v[idx]) for idx in range(len(flat_h))]
+            unique_p_colors, counts = np.unique(pixel_colors, return_counts=True)
+            color_distribution = dict(zip(unique_p_colors, counts))
+            
+            non_bg_pixels = sum([counts[i] for i in range(len(unique_p_colors)) if unique_p_colors[i] not in ["white", "grey"]])
+            if non_bg_pixels == 0:
+                non_bg_pixels = len(flat_h)
+                
+            best_match_cls = default_cls
+            max_score = -1.0
+            for cls_key in unique_classes:
+                expected_colors = class_colors[cls_key]
+                if not expected_colors:
+                    continue
+                    
+                match_pixels = sum([color_distribution.get(c, 0) for c in expected_colors])
+                score = match_pixels / float(non_bg_pixels)
+                
+                if score > max_score:
+                    max_score = score
+                    best_match_cls = cls_key
+                    
+            return best_match_cls
 
+        # 4. Map DINO detections back to planogram slots and classify
+        for gt in gt_boxes:
+            x1_gt = float(gt['x1'])
+            y1_gt = float(gt['y1'])
+            x2_gt = float(gt['x2'])
+            y2_gt = float(gt['y2'])
+            
+            gt_w = x2_gt - x1_gt
+            gt_h = y2_gt - y1_gt
+            
+            best_det = None
+            max_iou = 0.0
+            
+            if len(results["scores"]) > 0:
+                for i, box in enumerate(results["boxes"].cpu().numpy()):
+                    det_w = box[2] - box[0]
+                    det_h = box[3] - box[1]
+                    
+                    # Spatial filtering
+                    if det_w > gt_w * 2.0 or det_w < gt_w * 0.5:
+                        continue
+                    if det_h > gt_h * 2.0 or det_h < gt_h * 0.5:
+                        continue
+                        
+                    iou = calculate_iou(box, [x1_gt, y1_gt, x2_gt, y2_gt])
+                    if iou > max_iou:
+                        max_iou = iou
+                        best_det = {
+                            "box": box,
+                            "conf": float(results["scores"][i])
+                        }
+            
+            # Hybrid Classification
+            if best_det is not None and max_iou > 0.25:
+                # Crop the DINO detected box
+                bx1, by1, bx2, by2 = [int(val) for val in best_det["box"]]
+                crop = frame[by1:by2, bx1:bx2]
+                detected_label = get_crop_classification(crop)
+                confidence = best_det["conf"]
+            else:
+                # Fallback: Crop the expected slot coordinate directly
+                pad_w = int(gt_w * 0.10)
+                pad_h = int(gt_h * 0.10)
+                cx1 = max(0, int(x1_gt - pad_w))
+                cy1 = max(0, int(y1_gt - pad_h))
+                cx2 = min(w, int(x2_gt + pad_w))
+                cy2 = min(h, int(y2_gt + pad_h))
+                crop = frame[cy1:cy2, cx1:cx2]
+                detected_label = get_crop_classification(crop)
+                confidence = 0.85  # Default confidence for static slot classification
+                
+            class_confidences = {cls: 0.0 for cls in unique_classes}
+            class_confidences[detected_label] = confidence
+                
+            is_match = (normalize(detected_label) == normalize(gt['label']))
+            
             slot_results.append({
                 "label": gt['label'],
-                "detected": best_det_label,
+                "detected": detected_label,
                 "match": is_match,
-                "confidence": best_det_conf,
+                "confidence": confidence,
+                "all_scores": class_confidences,
                 "expected_box": {"x1": x1_gt, "y1": y1_gt, "x2": x2_gt, "y2": y2_gt}
             })
             
-            # Memory Management: Clear cache between crops to prevent OOM on limited hardware
-            if device == "cuda":
-                torch.cuda.empty_cache()
-            elif device == "mps":
-                torch.mps.empty_cache()
+            all_detections_for_viz.append({
+                "box": [x1_gt, y1_gt, x2_gt, y2_gt],
+                "label": detected_label,
+                "score": confidence,
+                "all_scores": class_confidences
+            })
+                
+            # Print the result
+            print(f"Slot expected '{gt['label']}' -> Winner: {detected_label}, IoU: {max_iou:.4f}")
             
+        # Memory Management: Clear cache between frames to prevent memory leaks
+        if device == "cuda":
+            torch.cuda.empty_cache()
+        elif device == "mps":
+            torch.mps.empty_cache()
         
         # Annotate the frame
         annotated_frame = frame.copy()
@@ -242,6 +325,7 @@ async def process_video(video: UploadFile = File(...), config: str = Form(...)):
             detected_json.append({
                 "label": det['label'],
                 "confidence": float(det['score']),
+                "all_scores": det['all_scores'],
                 "x1": float(det['box'][0]), "y1": float(det['box'][1]),
                 "x2": float(det['box'][2]), "y2": float(det['box'][3])
             })
@@ -277,6 +361,7 @@ async def process_video(video: UploadFile = File(...), config: str = Form(...)):
                     detected_json.append({
                         "label": det['label'],
                         "confidence": float(det['score']),
+                        "all_scores": det['all_scores'],
                         "x1": float(det['box'][0]), "y1": float(det['box'][1]),
                         "x2": float(det['box'][2]), "y2": float(det['box'][3])
                     })
