@@ -35,6 +35,11 @@ export const drugs = pgTable('drugs', {
   drugName: text('drug_name').notNull(),
   isEmpty: boolean('is_empty').default(false),
   lastUpdated: timestamp('last_updated').defaultNow(),
+  aspectRatio: real('aspect_ratio'),
+  hsvH: real('hsv_h'),
+  hsvS: real('hsv_s'),
+  hsvV: real('hsv_v'),
+  dominantColor: text('dominant_color'),
 });
 
 export const alerts = pgTable('alerts', {

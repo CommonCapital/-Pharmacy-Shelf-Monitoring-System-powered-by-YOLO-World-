@@ -4,35 +4,46 @@ import { shelves, slots, drugs } from '@/db/schema';
 
 export async function POST(req: Request) {
   try {
-    const { shelfName, cameraId, drugNames, imageBase64 } = await req.json();
+    const { shelfName, cameraId, boxes, image } = await req.json();
 
-    // 1. Call FastAPI for initial detection
-    const mlResponse = await fetch('http://localhost:8000/detect', {
+    // 1. Call FastAPI /register-templates to extract geometry & HSV color profiles
+    const mlResponse = await fetch('http://localhost:8000/register-templates', {
       method: 'POST',
-      body: JSON.stringify({ drug_names: drugNames, image: imageBase64 }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image: image, // base64 string
+        boxes: boxes.map((b: any) => ({
+          x1: b.x1,
+          y1: b.y1,
+          x2: b.x2,
+          y2: b.y2,
+          label: b.name
+        }))
+      })
     }).then(r => r.json());
 
-    // 2. Sort detections left-to-right, top-to-bottom
-    const sorted = mlResponse.detections.sort((a: any, b: any) =>
-      a.bbox.y1 - b.bbox.y1 || a.bbox.x1 - b.bbox.x1
-    );
+    if (mlResponse.error) {
+      throw new Error(mlResponse.error);
+    }
 
-    // 3. Create shelf in DB
+    // 2. Create shelf in DB
     const [shelf] = await db.insert(shelves)
       .values({ name: shelfName, cameraId })
       .returning();
 
-    // 4. Write slots and drugs
-    for (let i = 0; i < sorted.length; i++) {
-      const det = sorted[i];
+    // 3. Write slots and drugs with HSV templates
+    for (let i = 0; i < boxes.length; i++) {
+      const b = boxes[i];
+      const template = mlResponse.templates ? mlResponse.templates.find((t: any) => t.label === b.name) : null;
+      
       const [slot] = await db.insert(slots)
         .values({ 
             shelfId: shelf.id, 
             slotIndex: i + 1, 
-            x1: det.bbox.x1, 
-            y1: det.bbox.y1, 
-            x2: det.bbox.x2, 
-            y2: det.bbox.y2 
+            x1: b.x1, 
+            y1: b.y1, 
+            x2: b.x2, 
+            y2: b.y2 
         })
         .returning();
         
@@ -40,11 +51,16 @@ export async function POST(req: Request) {
         .values({ 
             slotId: slot.id, 
             shelfId: shelf.id, 
-            drugName: det.name 
+            drugName: b.name,
+            aspectRatio: template ? template.aspect_ratio : null,
+            hsvH: template ? template.hsv_color.h : null,
+            hsvS: template ? template.hsv_color.s : null,
+            hsvV: template ? template.hsv_color.v : null,
+            dominantColor: template ? template.hsv_color.dominant_color : null
         });
     }
 
-    return NextResponse.json({ success: true, shelfId: shelf.id, slotsCreated: sorted.length });
+    return NextResponse.json({ success: true, shelfId: shelf.id, slotsCreated: boxes.length });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }

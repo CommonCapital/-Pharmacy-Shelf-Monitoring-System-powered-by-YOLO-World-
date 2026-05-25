@@ -3,7 +3,8 @@ import { Pool } from 'pg';
 import * as schema from './schema';
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgres://localhost:5432/pharmacy_shelf',
+  connectionString: process.env.DATABASE_URL || 'postgres://postgres:password@localhost:5432/pharmacy_shelf',
 });
 
 export const db = drizzle(pool, { schema });
+

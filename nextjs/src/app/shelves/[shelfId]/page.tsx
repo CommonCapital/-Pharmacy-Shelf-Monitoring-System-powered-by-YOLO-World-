@@ -42,26 +42,50 @@ export default function ShelfDetail() {
       const res = await fetch(`/api/shelves/setup`); // In real app, filter by ID
       const allShelves = await res.json();
       const shelf = allShelves.find((s: any) => s.id.toString() === id);
-      
-      // For demo, we need to fetch slots too. This is the production wiring.
-      // Mocking the slot fetch which would be a separate GET /api/shelves/[id]
       setShelfName(shelf?.name || 'Dispensing Shelf A');
       
-      // 2. Connect to FastAPI WebSocket
-      ws.current = new WebSocket(`ws://localhost:8000/ws/monitor/${id}`);
+      // Fetch slots and drug templates dynamically from our new GET endpoint!
+      const slotsRes = await fetch(`/api/shelves/${id}/scan`);
+      const slotsData = await slotsRes.json();
       
-      ws.current.onopen = () => {
-        // Send drug names for model optimization
-        ws.current?.send(JSON.stringify({ 
-          drug_names: ["Ibuprofen", "Paracetamol", "Metformin", "Atorvastatin"] 
+      if (slotsData.slots) {
+        const dbSlots = slotsData.slots.map((s: any) => ({
+          id: s.slots.id,
+          slotIndex: s.slots.slotIndex,
+          x1: s.slots.x1,
+          y1: s.slots.y1,
+          x2: s.slots.x2,
+          y2: s.slots.y2,
+          drugName: s.drugs.drugName,
+          template: {
+            label: s.drugs.drugName,
+            aspect_ratio: s.drugs.aspectRatio,
+            hsv_color: {
+              h: s.drugs.hsvH,
+              s: s.drugs.hsvS,
+              v: s.drugs.hsvV,
+              dominant_color: s.drugs.dominantColor
+            }
+          }
         }));
-      };
-
-      ws.current.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        setActiveDetections(data.detections);
-        compareAndAlert(data.detections);
-      };
+        setSlots(dbSlots);
+        
+        // 2. Connect to FastAPI WebSocket
+        ws.current = new WebSocket(`ws://localhost:8000/ws/monitor/${id}`);
+        
+        ws.current.onopen = () => {
+          // Send dynamic drug templates from the database for model optimization!
+          ws.current?.send(JSON.stringify({ 
+            templates: dbSlots.map((s: any) => s.template)
+          }));
+        };
+  
+        ws.current.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          setActiveDetections(data.detections);
+          compareAndAlert(data.detections);
+        };
+      }
     };
 
     init();

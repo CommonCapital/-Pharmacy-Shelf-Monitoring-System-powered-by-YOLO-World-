@@ -168,15 +168,26 @@ export default function PrototypePage() {
     const backendBoxes = boxes.map(({x1, y1, x2, y2, label}) => ({x1, y1, x2, y2, label}));
     formData.append('config', JSON.stringify(backendBoxes));
 
+    if (image) {
+      const imageBlob = await fetch(image).then(r => r.blob());
+      formData.append('reference_image', imageBlob, 'reference_image.jpg');
+    }
+
     // This calls the FastAPI backend to process video/image against JSON config
     const res = await fetch('http://localhost:8000/process-video', {
       method: 'POST',
       body: formData
     });
     const results = await res.json();
-    setProcessedMediaUrl(results.media_url);
-    setVideoResults(results.comparison);
-    setDetectedJson(results.detected_json);
+    if (results.error) {
+      alert("Error processing media: " + results.error);
+      setVideoResults([]);
+      setDetectedJson([]);
+    } else {
+      setProcessedMediaUrl(results.media_url);
+      setVideoResults(results.comparison || []);
+      setDetectedJson(results.detected_json || []);
+    }
     setIsProcessing(false);
   };
 
@@ -259,7 +270,7 @@ export default function PrototypePage() {
             )}
           </div>
           
-          {videoResults.length > 0 && (
+          {videoResults && videoResults.length > 0 && (
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-6">
                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 shadow-sm max-h-96 overflow-auto">
                  <h3 className="text-xs font-bold text-[#002147] uppercase border-b pb-2 mb-2 sticky top-0 bg-slate-50">Planogram JSON (Expected)</h3>
@@ -278,18 +289,29 @@ export default function PrototypePage() {
                <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm max-h-96 overflow-auto space-y-3">
                  <h3 className="text-xs font-bold text-[#002147] uppercase border-b pb-2 mb-2 sticky top-0 bg-white">Comparison Results</h3>
                  {videoResults.map((res, i) => (
-                   <div key={i} className={`p-3 rounded-lg border ${res.match ? 'bg-green-50 border-green-100' : 'bg-red-50 border-red-100'}`}>
-                      <div className="flex justify-between items-center mb-1">
-                        <span className="text-xs font-bold">{res.label}</span>
-                        <span className={`text-[10px] font-black uppercase ${res.match ? 'text-green-600' : 'text-red-600'}`}>
-                           {res.match ? 'MATCH' : 'MISMATCH'}
-                        </span>
-                      </div>
-                      <p className="text-[10px] text-slate-500">
-                        {res.match ? `Correctly detected at expected position.` : `Expected ${res.label}, found ${res.detected}.`}
-                      </p>
-                   </div>
-                 ))}
+                    <div key={i} className={`p-3 rounded-lg border ${res.match ? 'bg-green-50 border-green-100' : 'bg-red-50 border-red-100'} transition-all hover:scale-[1.01]`}>
+                       <div className="flex justify-between items-center mb-1">
+                         <span className="text-xs font-bold">{res.label}</span>
+                         <span className={`text-[10px] font-black uppercase ${res.match ? 'text-green-600' : 'text-red-600'}`}>
+                            {res.match ? 'MATCH' : 'MISMATCH'}
+                         </span>
+                       </div>
+                       <p className="text-[10px] text-slate-500">
+                         {res.match ? `Correctly detected at expected position.` : `Expected ${res.label}, found ${res.detected}.`}
+                       </p>
+                       {res.hsv_color && (
+                         <div className="mt-2 flex items-center gap-1.5 bg-white/70 py-1 px-2 rounded-md border border-slate-100 shadow-sm w-fit animate-in fade-in duration-300">
+                           <span 
+                             className="w-2.5 h-2.5 rounded-full border border-slate-200/80 inline-block shadow-sm" 
+                             style={{ backgroundColor: res.hsv_color.dominant_color }} 
+                           />
+                           <span className="text-[9px] font-mono font-bold text-slate-500">
+                             HSV: ({res.hsv_color.h}, {res.hsv_color.s}, {res.hsv_color.v}) • <span className="capitalize">{res.hsv_color.dominant_color}</span>
+                           </span>
+                         </div>
+                       )}
+                    </div>
+                  ))}
                </div>
             </div>
           )}

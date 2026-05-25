@@ -3,31 +3,63 @@ import { db } from '@/db';
 import { slots, drugs, alerts } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 
+export async function GET(req: Request, { params }: { params: { shelfId: string } }) {
+  try {
+    const shelfId = parseInt(params.shelfId);
+    const groundTruth = await db
+      .select()
+      .from(slots)
+      .innerJoin(drugs, eq(drugs.slotId, slots.id))
+      .where(eq(slots.shelfId, shelfId));
+      
+    return NextResponse.json({ slots: groundTruth });
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+
 export async function POST(req: Request, { params }: { params: { shelfId: string } }) {
   try {
     const { imageBase64 } = await req.json();
     const shelfId = parseInt(params.shelfId);
 
-    // 1. Load ground truth from DB
+    // 1. Load ground truth templates from DB
     const groundTruth = await db
       .select()
       .from(slots)
       .innerJoin(drugs, eq(drugs.slotId, slots.id))
       .where(eq(slots.shelfId, shelfId));
 
-    // 2. Call FastAPI for region-based detection
+    // Construct template properties for verification
+    const templates = groundTruth.map(r => ({
+      label: r.drugs.drugName,
+      aspect_ratio: r.drugs.aspectRatio || 1.0,
+      hsv_color: {
+        h: r.drugs.hsvH || 0.0,
+        s: r.drugs.hsvS || 0.0,
+        v: r.drugs.hsvV || 0.0,
+        dominant_color: r.drugs.dominantColor || 'unknown'
+      }
+    }));
+
+    // 2. Call FastAPI for zero-shot object detection and color validation
     const liveDetections = await fetch('http://localhost:8000/detect', {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         image: imageBase64,
-        drug_names: groundTruth.map(r => r.drugs.drugName)
+        templates: templates
       })
     }).then(r => r.json());
+
+    if (liveDetections.error) {
+      throw new Error(liveDetections.error);
+    }
 
     // 3. Compare and write alerts
     const newAlerts = [];
     for (const slot of groundTruth) {
-      // Find detection in the slot's region
+      // Find matching detection in the slot's region using coordinates
       const live = liveDetections.detections.find((d: any) => {
           const cx = (d.bbox.x1 + d.bbox.x2) / 2;
           const cy = (d.bbox.y1 + d.bbox.y2) / 2;
